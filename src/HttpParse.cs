@@ -19,6 +19,19 @@ namespace BeetleX.FastHttpApi
         public const string OPTIONS_TAG = "OPTIONS";
 
         [ThreadStatic]
+        private static StringBuilder mStringBuilderBuffer;
+
+        public static StringBuilder StringBuilderBuffer
+        {
+            get
+            {
+                if (mStringBuilderBuffer == null)
+                    mStringBuilderBuffer = new StringBuilder();
+                return mStringBuilderBuffer;
+            }
+        }
+
+        [ThreadStatic]
         private static char[] mCharCacheBuffer;
 
         public static char[] GetCharBuffer()
@@ -327,7 +340,7 @@ namespace BeetleX.FastHttpApi
             int offset = 0;
             for (int i = 0; i < line.Length; i++)
             {
-                if (line[i] == ':' && name==null)
+                if (line[i] == ':' && name == null)
                 {
                     name = new string(line.Slice(offset, i - offset));
                     offset = i + 1;
@@ -444,7 +457,11 @@ namespace BeetleX.FastHttpApi
                     qsdata = url.Slice(i + 1, url.Length - i - 1);
                     break;
                 }
+                if (url[i] == '/')
+                    request.PathLevel++;
             }
+            if (queryString == null)
+                return result;
             if (result > 0)
             {
                 string name = null;
@@ -479,28 +496,17 @@ namespace BeetleX.FastHttpApi
 
         public static void ReadUrlPathAndExt(ReadOnlySpan<char> url, QueryString queryString, HttpRequest request, HttpOptions config)
         {
-            bool urlIgnoreCase = config.UrlIgnoreCase;
-
-            if (urlIgnoreCase)
-                request.BaseUrl = CharToLower(url);
-            else
-                request.BaseUrl = new string(url);
+            request.BaseUrl = new string(url);
             for (int i = url.Length - 1; i >= 0; i--)
             {
                 if (url[i] == '.' && request.Ext == null)
-                {
-                    if (urlIgnoreCase)
-                        request.Ext = CharToLower(url.Slice(i + 1, url.Length - i - 1));
-                    else
-                        request.Ext = new string(url.Slice(i + 1, url.Length - i - 1));
+                {          
+                    request.Ext = CharToLower(url.Slice(i + 1, url.Length - i - 1));
                     continue;
                 }
                 if (url[i] == '/')
                 {
-                    if (urlIgnoreCase)
-                        request.Path = CharToLower(url.Slice(0, i + 1));
-                    else
-                        request.Path = new string(url.Slice(0, i + 1));
+                    request.Path = new string(url.Slice(0, i + 1));
                     return;
                 }
             }

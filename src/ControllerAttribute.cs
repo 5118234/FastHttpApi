@@ -9,11 +9,21 @@ namespace BeetleX.FastHttpApi
     {
         public ControllerAttribute()
         {
-            SingleInstance = true;
+            InstanceType = InstanceType.Single;
         }
         public string BaseUrl { get; set; }
 
-        public bool SingleInstance { get; set; }
+        public InstanceType InstanceType { get; set; }
+
+        public bool SkipPublicFilter { get; set; } = false;
+    }
+
+
+    public enum InstanceType
+    {
+        Single,
+        Session,
+        None
     }
 
 
@@ -21,7 +31,7 @@ namespace BeetleX.FastHttpApi
 
     public interface IController
     {
-        void Init(HttpApiServer server,string path);
+        void Init(HttpApiServer server, string path);
     }
 
     [AttributeUsage(AttributeTargets.Method)]

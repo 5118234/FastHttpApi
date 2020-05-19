@@ -42,11 +42,15 @@ namespace BeetleX.FastHttpApi
 
         internal bool AsyncResult { get; set; }
 
+        private byte[] mLengthBuffer = new byte[10];
+
         internal void Reset()
         {
             AsyncResult = false;
             Header.Clear();
             mSetCookies.Clear();
+            //Header = new Header();
+            //mSetCookies = new List<string>();
             mCompletedStatus = 0;
             mBody = null;
             Code = "200";
@@ -58,27 +62,40 @@ namespace BeetleX.FastHttpApi
             AsyncResult = true;
         }
 
-        public void SetCookie(string name, string value, DateTime? expires = null)
-        {
-            SetCookie(name, value, "/", expires);
-        }
-
         public void SetCookie(string name, string value, string path, DateTime? expires = null)
         {
-            string cookie;
+            SetCookie(name, value, path, null, expires);
+        }
+
+        public void SetCookie(string name, string value, DateTime? expires = null)
+        {
+            SetCookie(name, value, "/", null, expires);
+        }
+
+        public void SetCookie(string name, string value, string path, string domain, DateTime? expires = null)
+        {
             if (string.IsNullOrEmpty(name))
                 return;
             name = System.Web.HttpUtility.UrlEncode(name);
             value = System.Web.HttpUtility.UrlEncode(value);
-            if (expires == null)
+            StringBuilder sb = new StringBuilder();
+            sb.Append(name).Append("=").Append(value);
+
+            if (!string.IsNullOrEmpty(path))
             {
-                cookie = string.Format("{0}={1};path={2};HttpOnly", name, value, path);
+                sb.Append(";Path=").Append(path);
             }
-            else
+            if (!string.IsNullOrEmpty(domain))
             {
-                cookie = string.Format("{0}={1};path={2};expires={3};HttpOnly", name, value, path, expires.Value.ToString("r"));
+                sb.Append(";Domain=").Append(domain);
             }
-            mSetCookies.Add(cookie);
+            if (expires != null)
+            {
+                sb.Append(";Expires=").Append(expires.Value.ToString("r"));
+            }
+
+            sb.Append(";HttpOnly");
+            mSetCookies.Add(sb.ToString());
         }
 
         public void Result(object data)
@@ -111,23 +128,13 @@ namespace BeetleX.FastHttpApi
             Completed(null);
         }
 
-        public void SetDate()
-        {
-            SetDate(DateTime.Now);
-        }
-
-        public void SetDate(DateTime dateTime)
-        {
-            Header[HeaderTypeFactory.DATE] = dateTime.ToUniversalTime().ToString("r");
-        }
-
 
         private void Completed(object data)
         {
             if (System.Threading.Interlocked.CompareExchange(ref mCompletedStatus, 1, 0) == 0)
             {
                 mBody = data;
-                Session.Server.Send(this, this.Session);
+                Session?.Server?.Send(this, this.Session);
             }
         }
 
@@ -136,7 +143,7 @@ namespace BeetleX.FastHttpApi
             Header[HeaderTypeFactory.CONTENT_TYPE] = type;
         }
 
-        public string HttpVersion { get; set; }
+        public string HttpVersion { get; set; } = "HTTP/1.1";
 
         public void SetStatus(string code, string msg)
         {
@@ -145,18 +152,24 @@ namespace BeetleX.FastHttpApi
         }
 
 
+        private byte[] GetLengthBuffer(string length)
+        {
+            Encoding.ASCII.GetBytes(length, 0, length.Length, mLengthBuffer, 0);
+            for (int i = length.Length; i < 10; i++)
+            {
+                mLengthBuffer[i] = 32;
+            }
+            return mLengthBuffer;
+        }
 
         private void OnWrite(PipeStream stream)
         {
             IResult result = mBody as IResult;
             if (result != null)
             {
-                this.Header[HeaderTypeFactory.CONTENT_TYPE] = result.ContentType;
                 result.Setting(this);
             }
-
             byte[] buffer = HttpParse.GetByteBuffer();
-
             int hlen = 0;
             hlen = hlen + Encoding.ASCII.GetBytes(HttpVersion, 0, HttpVersion.Length, buffer, hlen);
             buffer[hlen] = HeaderTypeFactory._SPACE_BYTE;
@@ -174,6 +187,14 @@ namespace BeetleX.FastHttpApi
             stream.Write(buffer, 0, hlen);
             stream.Write(HeaderTypeFactory.SERVAR_HEADER_BYTES, 0, HeaderTypeFactory.SERVAR_HEADER_BYTES.Length);
             Header.Write(stream);
+            if (result != null)
+            {
+                result.ContentType.Write(stream);
+            }
+            var datebuffer = GMTDate.Default.DATE;
+
+            stream.Write(datebuffer.Array, 0, datebuffer.Count);
+
             for (int i = 0; i < mSetCookies.Count; i++)
             {
                 HeaderTypeFactory.Write(HeaderTypeFactory.SET_COOKIE, stream);
@@ -183,12 +204,9 @@ namespace BeetleX.FastHttpApi
             if (mBody != null)
             {
 
-                //StaticResurce.FileBlock fb = mBody as StaticResurce.FileBlock;
-                //if (fb != null)
                 if (mBody is IDataResponse dataResponse)
                 {
                     stream.Write(HeaderTypeFactory.LINE_BYTES, 0, 2);
-                    //((IDataResponse)fb).Write(stream);
                     dataResponse.Write(stream);
                 }
                 else
@@ -210,7 +228,8 @@ namespace BeetleX.FastHttpApi
                             int len = stream.CacheLength;
                             result.Write(stream, this);
                             int count = stream.CacheLength - len;
-                            contentLength.Full(count.ToString().PadRight(10), stream.Encoding);
+                            // contentLength.Full(count.ToString().PadRight(10), stream.Encoding);
+                            contentLength.Full(GetLengthBuffer(count.ToString()));
                         }
 
                     }
@@ -228,11 +247,11 @@ namespace BeetleX.FastHttpApi
             }
 
             if (Session.Server.EnableLog(EventArgs.LogType.Debug))
-                Session.Server.Log(EventArgs.LogType.Debug, Session, "{0} {1}", Request.RemoteIPAddress, this.ToString());
+                Session.Server.Log(EventArgs.LogType.Debug, Session, $"HTTP {Request.ID} {Request.RemoteIPAddress} response detail {this.ToString()}");
 
             if (Session.Server.EnableLog(EventArgs.LogType.Info))
             {
-                Session.Server.Log(EventArgs.LogType.Info, Session, "{4} {0} {1} response {2} {3}", Request.Method, Request.Url, Code, CodeMsg, Request.RemoteIPAddress);
+                Session.Server.Log(EventArgs.LogType.Info, Session, $"HTTP {Request.ID} {Request.RemoteIPAddress} {Request.Method} {Request.Url} response {Code} {CodeMsg}");
             }
         }
 
@@ -253,6 +272,7 @@ namespace BeetleX.FastHttpApi
             }
             finally
             {
+                Request.Server.IncrementResponsed(Request, this, TimeWatch.GetTotalMilliseconds() - Request.RequestTime, int.Parse(this.Code), CodeMsg);
                 Request.Recovery();
             }
         }
@@ -260,6 +280,7 @@ namespace BeetleX.FastHttpApi
         public override string ToString()
         {
             StringBuilder sb = new StringBuilder();
+            sb.AppendLine("");
             sb.AppendLine(Request.Method + " " + Request.Url + " response " + Code + " " + CodeMsg);
             sb.Append(this.Header.ToString());
             for (int i = 0; i < mSetCookies.Count; i++)

@@ -29,6 +29,7 @@ namespace BeetleX.FastHttpApi
 
         public object Tag { get; set; }
 
+        public NextQueue Queue { get; set; }
 
         public string RequestID { get; set; }
 
@@ -48,7 +49,7 @@ namespace BeetleX.FastHttpApi
                     result.Url = this.ActionUrl;
                 frame = Server.CreateDataFrame(result);
             }
-            Request.Session.Send(frame);
+            frame.Send(Request.Session);
         }
 
         internal bool AsyncResult { get; set; }
@@ -113,6 +114,8 @@ namespace BeetleX.FastHttpApi
         }
 
         private Data.IDataContext mDataContext;
+
+        public NextQueue Queue { get; set; }
 
         public HttpRequest Request { get; set; }
 

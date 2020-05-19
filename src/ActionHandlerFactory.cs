@@ -18,10 +18,27 @@ namespace BeetleX.FastHttpApi
 
         public HttpApiServer Server { get; set; }
 
-        private System.Collections.Generic.Dictionary<string, ActionHandler> mMethods = new Dictionary<string, ActionHandler>();
+        private System.Collections.Generic.Dictionary<string, ActionHandler> mMethods = new Dictionary<string, ActionHandler>(StringComparer.OrdinalIgnoreCase);
+
+        private Dictionary<Type, Type> mParameterBinders = new Dictionary<Type, Type>();
+
+        public Action<Assembly[]> AssembliesLoading { get; set; }
 
         public void Register(params Assembly[] assemblies)
         {
+            AssembliesLoading?.Invoke(assemblies);
+            foreach (Assembly item in assemblies)
+            {
+                Type[] types = item.GetTypes();
+                foreach (Type type in types)
+                {
+                    PMapper mapper = type.GetCustomAttribute<PMapper>(false);
+                    if (mapper != null)
+                    {
+                        RegisterParameterBinder(mapper.ParameterType, type);
+                    }
+                }
+            }
             foreach (Assembly item in assemblies)
             {
                 Type[] types = item.GetTypes();
@@ -37,11 +54,11 @@ namespace BeetleX.FastHttpApi
                             OnControllerInstance(e);
                             if (e.Controller == null)
                             {
-                                Register(Server.Options, type, Activator.CreateInstance(type), ca.BaseUrl, Server, ca);
+                                Register(Server.Options, type, Activator.CreateInstance(type), ca.BaseUrl, Server, ca, null);
                             }
                             else
                             {
-                                Register(Server.Options, type, e.Controller, ca.BaseUrl, Server, ca);
+                                Register(Server.Options, type, e.Controller, ca.BaseUrl, Server, ca, null);
                             }
                         }
                         catch (Exception e_)
@@ -53,14 +70,47 @@ namespace BeetleX.FastHttpApi
                             }
                         }
                     }
+
                 }
             }
         }
 
-        public object GetController(Type type)
+        public void RegisterParameterBinder(Type type, Type binderType)
+        {
+            try
+            {
+                ParameterBinder parameterBinder = (ParameterBinder)Activator.CreateInstance(binderType);
+                mParameterBinders[type] = binderType;
+                if (Server.EnableLog(EventArgs.LogType.Info))
+                    Server.Log(EventArgs.LogType.Info, $"Register {type.Name}'s {binderType.Name} parameter binder success");
+            }
+            catch (Exception e_)
+            {
+                if (Server.EnableLog(EventArgs.LogType.Error))
+                    Server.Log(EventArgs.LogType.Error, $"Register {type.Name}'s {binderType.Name} parameter binder error {e_.Message} {e_.StackTrace}");
+            }
+        }
+
+        public void RegisterParameterBinder<T, BINDER>() where BINDER : ParameterBinder, new()
+        {
+            RegisterParameterBinder(typeof(T), typeof(BINDER));
+        }
+
+
+        public ParameterBinder GetParameterBinder(Type type)
+        {
+            if (mParameterBinders.TryGetValue(type, out Type binderType))
+            {
+                return (ParameterBinder)Activator.CreateInstance(binderType);
+            }
+            return null;
+        }
+
+        public object GetController(Type type, IHttpContext context)
         {
             EventControllerInstanceArgs e = new EventControllerInstanceArgs();
             e.Type = type;
+            e.Context = context;
             OnControllerInstance(e);
             return e.Controller;
         }
@@ -78,7 +128,23 @@ namespace BeetleX.FastHttpApi
             ControllerInstance?.Invoke(this, e);
         }
 
+        internal void OnParameterBinding(EventParameterBinding e)
+        {
+            ParameterBinding?.Invoke(this, e);
+        }
+
         public event System.EventHandler<EventControllerInstanceArgs> ControllerInstance;
+
+        public event System.EventHandler<EventParameterBinding> ParameterBinding;
+
+        public bool HasParameterBindEvent
+        {
+            get
+            {
+                return ParameterBinding != null;
+            }
+        }
+
 
         public void Clear()
         {
@@ -137,7 +203,37 @@ namespace BeetleX.FastHttpApi
             ControllerAttribute ca = type.GetCustomAttribute<ControllerAttribute>(false);
             if (ca != null)
             {
-                Register(this.Server.Options, type, controller, ca.BaseUrl, this.Server, ca);
+                Register(this.Server.Options, type, controller, ca.BaseUrl, this.Server, ca, null);
+            }
+        }
+        public void Register(object controller, ControllerAttribute ca, Action<EventActionRegistingArgs> callback = null)
+        {
+            Register(Server.Options, controller.GetType(), controller, ca.BaseUrl, Server, ca, callback);
+        }
+        public void Register(Type type, ControllerAttribute ca, Action<EventActionRegistingArgs> callback = null)
+        {
+
+            try
+            {
+                EventControllerInstanceArgs e = new EventControllerInstanceArgs();
+                e.Type = type;
+                OnControllerInstance(e);
+                if (e.Controller == null)
+                {
+                    Register(Server.Options, type, Activator.CreateInstance(type), ca.BaseUrl, Server, ca, callback);
+                }
+                else
+                {
+                    Register(Server.Options, type, e.Controller, ca.BaseUrl, Server, ca, callback);
+                }
+            }
+            catch (Exception e_)
+            {
+                if (Server.EnableLog(EventArgs.LogType.Error))
+                {
+                    string msg = $"{type} controller register error {e_.Message} {e_.StackTrace}";
+                    Server.Log(EventArgs.LogType.Error, msg);
+                }
             }
         }
 
@@ -159,7 +255,8 @@ namespace BeetleX.FastHttpApi
                 filters.Remove(item);
         }
 
-        private void Register(HttpOptions config, Type controllerType, object controller, string rooturl, HttpApiServer server, ControllerAttribute ca)
+        private void Register(HttpOptions config, Type controllerType, object controller, string rooturl, HttpApiServer server, ControllerAttribute ca,
+            Action<EventActionRegistingArgs> callback)
         {
             DataConvertAttribute controllerDataConvert = controllerType.GetCustomAttribute<DataConvertAttribute>(false);
             OptionsAttribute controllerOptionsAttribute = controllerType.GetCustomAttribute<OptionsAttribute>(false);
@@ -174,7 +271,8 @@ namespace BeetleX.FastHttpApi
             }
             RequestMaxRPS control_maxRPS = controllerType.GetCustomAttribute<RequestMaxRPS>();
             List<FilterAttribute> filters = new List<FilterAttribute>();
-            filters.AddRange(config.Filters);
+            if (!ca.SkipPublicFilter)
+                filters.AddRange(config.Filters);
             IEnumerable<FilterAttribute> fas = controllerType.GetCustomAttributes<FilterAttribute>(false);
             filters.AddRange(fas);
             IEnumerable<SkipFilterAttribute> skipfilters = controllerType.GetCustomAttributes<SkipFilterAttribute>(false);
@@ -187,7 +285,8 @@ namespace BeetleX.FastHttpApi
             {
                 string path = System.IO.Path.GetDirectoryName(controllerType.Assembly.Location) + System.IO.Path.DirectorySeparatorChar;
                 ((IController)obj).Init(server, path);
-                server.Log(EventArgs.LogType.Info, $"init {controllerType} controller path {path}");
+                if (server.EnableLog(EventArgs.LogType.Info))
+                    server.Log(EventArgs.LogType.Info, $"init {controllerType} controller path {path}");
             }
             foreach (MethodInfo mi in controllerType.GetMethods(BindingFlags.Instance | BindingFlags.Public))
             {
@@ -217,7 +316,7 @@ namespace BeetleX.FastHttpApi
                 }
                 string sourceUrl = rooturl + mi.Name;
                 string url = sourceUrl;
-                string method = HttpParse.GET_TAG;
+                string method = HttpParse.GET_TAG + "/" + HttpParse.POST_TAG;
                 string route = null;
                 GetAttribute get = mi.GetCustomAttribute<GetAttribute>(false);
                 if (get != null)
@@ -244,26 +343,50 @@ namespace BeetleX.FastHttpApi
                     route = put.Route;
                 }
 
-                if (server.Options.UrlIgnoreCase)
-                {
-                    url = sourceUrl.ToLower();
-                }
+                //if (server.Options.UrlIgnoreCase)
+                //{
+                //    url = sourceUrl.ToLower();
+                //}
                 RouteTemplateAttribute ra = null;
                 if (!string.IsNullOrEmpty(route))
                 {
                     ra = new RouteTemplateAttribute(route);
-                    string reurl = ra.Analysis(url);
-                    if (reurl != null)
-                        server.UrlRewrite.Add(reurl, url);
+                    string reurl;
+                    if (route[0] == '/')
+                    {
+                        reurl = ra.Analysis(null);
+                    }
+                    else if (route[0] == '{')
+                    {
+                        reurl = ra.Analysis(url + "/");
+                    }
+                    else
+                    {
+                        reurl = ra.Analysis(route.IndexOf('/', 0) > 0 ? rooturl : url + "/");
+                    }
+                    if (reurl == null)
+                    {
+                        if (route[0] == '/')
+                        {
+                            reurl = route;
+                        }
+                        else
+                        {
+                            reurl = rooturl + route;
+                        }
+                    }
+                    server.UrlRewrite.Add(null, reurl, url);
                 }
                 ActionHandler handler = GetAction(url);
                 if (handler != null)
                 {
-                    server.Log(EventArgs.LogType.Warring, "{0} already exists!replaced with {1}.{2}!", url, controllerType.Name,
-                        mi.Name);
+                    if (server.EnableLog(EventArgs.LogType.Error))
+                    {
+                        server.Log(EventArgs.LogType.Error, "{0} already exists! replaced with {1}.{2}!", url, controllerType.Name,
+                            mi.Name);
+                    }
                 }
-
-                handler = new ActionHandler(obj, mi);
+                handler = new ActionHandler(obj, mi, this.Server);
                 if (mi.ReturnType == typeof(Task) || mi.ReturnType.BaseType == typeof(Task))
                 {
                     handler.Async = true;
@@ -277,9 +400,15 @@ namespace BeetleX.FastHttpApi
                     handler.OptionsAttribute = controllerOptionsAttribute;
                 else
                     handler.OptionsAttribute = methodOptionsAttribute;
+                if (handler.OptionsAttribute == null && !ca.SkipPublicFilter)
+                    handler.OptionsAttribute = handler.HttpApiServer.Options.CrossDomain;
+                handler.ThreadQueue = controllerType.GetCustomAttribute<ThreadQueueAttribute>(false);
+                var queue = mi.GetCustomAttribute<ThreadQueueAttribute>(false);
+                if (queue != null)
+                    handler.ThreadQueue = queue;
                 handler.NoConvert = noconvert;
-                handler.SingleInstance = ca.SingleInstance;
-                handler.DataConvert = actionConvert;
+                handler.InstanceType = ca.InstanceType;
+                handler.DataConverter = actionConvert;
                 handler.Route = ra;
                 handler.Method = method;
                 handler.SourceUrl = sourceUrl;
@@ -297,10 +426,28 @@ namespace BeetleX.FastHttpApi
                 {
                     RemoveFilter(handler.Filters, item.Types);
                 }
-                AddHandlers(url, handler);
-                server.Log(EventArgs.LogType.Info, $"register { controllerType.Name}.{mi.Name} to [{handler.Method}:{url}]");
+                EventActionRegistingArgs registing = new EventActionRegistingArgs();
+                registing.Url = url;
+                registing.Handler = handler;
+                registing.Cancel = false;
+                callback?.Invoke(registing);
+                if (!registing.Cancel)
+                {
+                    AddHandlers(url, handler);
+                    server.ActionSettings(handler);
+                    if (server.EnableLog(EventArgs.LogType.Info))
+                    {
+                        server.Log(EventArgs.LogType.Info, $"register { controllerType.Name}.{mi.Name} to [{handler.Method}:{url}]");
+                    }
+                }
+                else
+                {
+                    if (server.EnableLog(EventArgs.LogType.Info))
+                    {
+                        server.Log(EventArgs.LogType.Info, $"register { controllerType.Name}.{mi.Name} cancel ");
+                    }
+                }
             }
-
         }
 
         private ActionHandler GetAction(string url)
@@ -310,7 +457,7 @@ namespace BeetleX.FastHttpApi
             return result;
         }
 
-        public ActionResult ExecuteWithWS(HttpRequest request, HttpApiServer server, JToken token)
+        public void ExecuteWithWS(HttpRequest request, HttpApiServer server, JToken token)
         {
             ActionResult result = new ActionResult();
             JToken url = token["url"];
@@ -318,16 +465,16 @@ namespace BeetleX.FastHttpApi
             if (url == null)
             {
                 if (server.EnableLog(EventArgs.LogType.Warring))
-                    server.BaseServer.Log(EventArgs.LogType.Warring, request.Session, "{0} ws not support, url info notfound!", request.RemoteIPAddress);
+                    server.BaseServer.Log(EventArgs.LogType.Warring, null, $"Websocket {request.ID} {request.RemoteIPAddress} process error action url info notfound!");
                 result.Code = 403;
                 result.Error = "not support, url info notfound!";
                 request.Session.Send(dataFrame);
-                return result;
+                return;
             }
             result.Url = url.Value<string>();
             string baseurl = result.Url;
-            if (server.Options.UrlIgnoreCase)
-                baseurl = HttpParse.CharToLower(result.Url);
+            //if (server.Options.UrlIgnoreCase)
+            //    baseurl = HttpParse.CharToLower(result.Url);
             if (baseurl[0] != '/')
                 baseurl = "/" + baseurl;
             result.Url = baseurl;
@@ -342,7 +489,7 @@ namespace BeetleX.FastHttpApi
             if (handler == null)
             {
                 if (server.EnableLog(EventArgs.LogType.Warring))
-                    server.BaseServer.Log(EventArgs.LogType.Warring, request.Session, "{0} ws execute {1} notfound", request.RemoteIPAddress, result.Url);
+                    server.BaseServer.Log(EventArgs.LogType.Warring, null, $"Websocket {request.ID} {request.RemoteIPAddress} ws execute {result.Url} notfound!");
                 result.Code = 404;
                 result.Error = "url " + baseurl + " notfound!";
                 request.Session.Send(dataFrame);
@@ -356,26 +503,34 @@ namespace BeetleX.FastHttpApi
                     WebsocketJsonContext dc = new WebsocketJsonContext(server, request, dataContxt);
                     dc.ActionUrl = baseurl;
                     dc.RequestID = result.ID;
+                    if (!Server.OnActionExecuting(dc))
+                        return;
                     ActionContext context = new ActionContext(handler, dc, this);
                     long startTime = server.BaseServer.GetRunTime();
                     WSActionResultHandler wSActionResultHandler = new WSActionResultHandler(dc, server, request, result, dataFrame, startTime);
-                    context.Execute(wSActionResultHandler);
+                    if (!handler.HasValidation || handler.ValidateParamters(context.Parameters, out (Validations.ValidationBase, ParameterInfo) error))
+                    {
+                        context.Execute(wSActionResultHandler);
+                    }
+                    else
+                    {
+                        server.ValidationOutputHandler.Execute(dc, wSActionResultHandler, error.Item1, error.Item2);
+                    }
                 }
                 catch (Exception e_)
                 {
                     handler.IncrementError();
                     if (server.EnableLog(EventArgs.LogType.Error))
-                        server.BaseServer.Log(EventArgs.LogType.Error, request.Session, "{0} ws execute {1} inner error {2}@{3}", request.RemoteIPAddress, result.Url, e_.Message, e_.StackTrace);
+                        server.BaseServer.Log(EventArgs.LogType.Error, null, $"Websocket {request.ID} {request.RemoteIPAddress} execute {result.Url} inner error {e_.Message}@{e_.StackTrace}");
                     result.Code = 500;
                     result.Error = e_.Message;
                     if (server.Options.OutputStackTrace)
                     {
                         result.StackTrace = e_.StackTrace;
                     }
-                    dataFrame.Send(request.Session);
+                    dataFrame.Send(request.Session, true);
                 }
             }
-            return result;
         }
 
         public void Execute(HttpRequest request, HttpResponse response, HttpApiServer server)
@@ -384,7 +539,7 @@ namespace BeetleX.FastHttpApi
             if (handler == null)
             {
                 if (server.EnableLog(EventArgs.LogType.Warring))
-                    server.BaseServer.Log(EventArgs.LogType.Warring, request.Session, $"{request.RemoteIPAddress} {request.Method} {request.Url}  not found");
+                    server.BaseServer.Log(EventArgs.LogType.Warring, null, $"HTTP {request.ID} {request.RemoteIPAddress} {request.Method} {request.Url}  not found");
                 if (!server.OnHttpRequesNotfound(request, response).Cancel)
                 {
                     NotFoundResult notFoundResult = new NotFoundResult($"{request.Method} {request.Url} not found");
@@ -395,43 +550,63 @@ namespace BeetleX.FastHttpApi
             {
                 try
                 {
-                    if (request.Method != handler.Method)
+                    if (handler.Method.IndexOf(request.Method, StringComparison.OrdinalIgnoreCase) == -1)
                     {
                         if (request.Method == HttpParse.OPTIONS_TAG && handler.OptionsAttribute != null)
                         {
                             if (server.EnableLog(EventArgs.LogType.Info))
-                                server.BaseServer.Log(EventArgs.LogType.Info, request.Session, $"{request.RemoteIPAddress}{request.Method}{request.Url} request");
+                                server.BaseServer.Log(EventArgs.LogType.Info, null, $"HTTP {request.ID} {request.RemoteIPAddress} {request.Method} {request.Url} request");
                             response.Result(handler.OptionsAttribute);
                         }
                         else
                         {
                             if (server.EnableLog(EventArgs.LogType.Warring))
-                                server.BaseServer.Log(EventArgs.LogType.Warring, request.Session, $"{request.RemoteIPAddress}{request.Method} {request.Url} not support");
-                            NotSupportResult notSupportResult = new NotSupportResult($"{request.Method}{request.Url} not support");
+                                server.BaseServer.Log(EventArgs.LogType.Warring, null, $"HTTP {request.ID} {request.RemoteIPAddress} {request.Method} {request.Url} not support");
+                            BadRequestResult notSupportResult = new BadRequestResult($"{request.Method}{request.Url} not support");
                             response.Result(notSupportResult);
                         }
                         return;
                     }
-                    if (!handler.NoConvert && handler.DataConvert == null)
-                    {
-                        handler.DataConvert = DataContextBind.GetConvertAttribute(request.ContentType);
-                    }
+                    request.ActionHandler = handler;
+                    DataConvertAttribute dataConverter = null;
                     if (!handler.NoConvert)
-                        handler.DataConvert.Execute(request.Data, request);
+                    {
+                        if (Server.Options.FixedConverter)
+                        {
+                            if (handler.DataConverter == null)
+                                handler.DataConverter = DataContextBind.GetConvertAttribute(request.ContentType);
+                            dataConverter = handler.DataConverter;
+                        }
+                        else
+                        {
+                            dataConverter = DataContextBind.GetConvertAttribute(request.ContentType);
+                        }
+                    }
+                    if (dataConverter != null)
+                        dataConverter.Execute(request.Data, request);
                     HttpContext pc = new HttpContext(server, request, response, request.Data);
                     long startTime = server.BaseServer.GetRunTime();
                     pc.ActionUrl = request.BaseUrl;
+                    if (!Server.OnActionExecuting(pc))
+                        return;
                     HttpActionResultHandler actionResult = new HttpActionResultHandler(Server, request, response, startTime);
                     ActionContext context = new ActionContext(handler, pc, this);
                     if (handler.OptionsAttribute != null)
                         handler.OptionsAttribute.SetResponse(request, response);
-                    context.Execute(actionResult);
+                    if (!handler.HasValidation || handler.ValidateParamters(context.Parameters, out (Validations.ValidationBase, ParameterInfo) error))
+                    {
+                        context.Execute(actionResult);
+                    }
+                    else
+                    {
+                        server.ValidationOutputHandler.Execute(pc, actionResult, error.Item1, error.Item2);
+                    }
                 }
                 catch (Exception e_)
                 {
                     handler.IncrementError();
                     if (server.EnableLog(EventArgs.LogType.Error))
-                        server.Log(EventArgs.LogType.Error, $"{request.RemoteIPAddress} http {request.Method} { request.Url} inner error {e_.Message}@{e_.StackTrace}");
+                        server.Log(EventArgs.LogType.Error, $"HTTP {request.ID} {request.RemoteIPAddress} {request.Method} { request.Url} inner error {e_.Message}@{e_.StackTrace}");
                     InnerErrorResult result = new InnerErrorResult($"http execute {request.BaseUrl} error ", e_, server.Options.OutputStackTrace);
                     response.Result(result);
 

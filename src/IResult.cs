@@ -10,7 +10,7 @@ namespace BeetleX.FastHttpApi
 {
     public interface IResult
     {
-        string ContentType { get; }
+        IHeaderItem ContentType { get; }
 
         int Length { get; set; }
 
@@ -23,7 +23,7 @@ namespace BeetleX.FastHttpApi
 
     public abstract class ResultBase : IResult
     {
-        public virtual string ContentType => "text/plain;charset=utf-8";
+        public virtual IHeaderItem ContentType => ContentTypes.TEXT;
 
         public virtual int Length { get; set; }
 
@@ -43,6 +43,34 @@ namespace BeetleX.FastHttpApi
 
 
 
+    public class BadRequestResult : ResultBase
+    {
+        public BadRequestResult(string message)
+        {
+            Message = message;
+        }
+
+        public BadRequestResult(string formater, params object[] data) : this(string.Format(formater, data)) { }
+
+        public string Message { get; set; }
+
+
+        public override bool HasBody => true;
+
+        public override void Setting(HttpResponse response)
+        {
+            response.Code = "400";
+            response.CodeMsg = "Bad Request";
+            response.Request.ClearStream();
+        }
+
+        public override void Write(PipeStream stream, HttpResponse response)
+        {
+            stream.Write(Message);
+        }
+    }
+
+
     public class NotFoundResult : ResultBase
     {
         public NotFoundResult(string message)
@@ -59,7 +87,6 @@ namespace BeetleX.FastHttpApi
 
         public override void Setting(HttpResponse response)
         {
-            response.Request.Server.RequestError();
             response.Code = "404";
             response.CodeMsg = "not found";
             response.Request.ClearStream();
@@ -125,7 +152,6 @@ namespace BeetleX.FastHttpApi
 
         public override void Setting(HttpResponse response)
         {
-            response.Request.Server.RequestError();
             response.Code = Code;
             response.CodeMsg = Message;
             response.Request.ClearStream();
@@ -155,7 +181,6 @@ namespace BeetleX.FastHttpApi
 
         public override void Setting(HttpResponse response)
         {
-            response.Request.Server.RequestError();
             response.Code = "401";
             response.CodeMsg = "Unauthorized";
             response.Request.ClearStream();
@@ -186,9 +211,8 @@ namespace BeetleX.FastHttpApi
 
         public override void Setting(HttpResponse response)
         {
-            response.Request.Server.RequestError();
             response.Code = "403";
-            response.CodeMsg = "not support";
+            response.CodeMsg = "No permission";
             response.Request.ClearStream();
         }
 
@@ -251,7 +275,7 @@ namespace BeetleX.FastHttpApi
 
         public object Data { get; set; }
 
-        public override string ContentType => "application/json";
+        public override IHeaderItem ContentType => ContentTypes.JSON;
 
         public override bool HasBody => true;
 
@@ -261,6 +285,8 @@ namespace BeetleX.FastHttpApi
             {
                 response.JsonSerializer.Serialize(response.JsonWriter, Data);
                 response.JsonWriter.Flush();
+                //var task = SpanJson.JsonSerializer.NonGeneric.Utf8.SerializeAsync(Data, stream).AsTask();
+                //task.Wait();
             }
         }
     }

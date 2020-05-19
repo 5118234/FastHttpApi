@@ -3,6 +3,7 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Linq;
 using System.Reflection;
 using System.Reflection.Emit;
 using System.Text;
@@ -16,7 +17,7 @@ namespace BeetleX.FastHttpApi
 
         private static int mIdSeed = 0;
 
-        public ActionHandler(object controller, System.Reflection.MethodInfo method)
+        public ActionHandler(object controller, System.Reflection.MethodInfo method, HttpApiServer httpApiServer)
         {
 
             ID = System.Threading.Interlocked.Increment(ref mIdSeed);
@@ -25,17 +26,25 @@ namespace BeetleX.FastHttpApi
             mMethod = method;
             mMethodHandler = new MethodHandler(mMethod);
             Controller = controller;
+            HttpApiServer = httpApiServer;
             LoadParameter();
             Filters = new List<FilterAttribute>();
             Method = "GET";
-            SingleInstance = true;
+            InstanceType = InstanceType.Single;
             ControllerType = Controller.GetType();
             NoConvert = false;
             var aname = controller.GetType().Assembly.GetName();
             this.AssmblyName = aname.Name;
             this.Version = aname.Version.ToString();
             Async = false;
+            ControllerUID = AssmblyName + "_" + ControllerType.Name;
         }
+
+        public ThreadQueueAttribute ThreadQueue { get; set; }
+
+        public HttpApiServer HttpApiServer { get; private set; }
+
+        public string ControllerUID { get; private set; }
 
         public string Path { get; set; }
 
@@ -55,11 +64,11 @@ namespace BeetleX.FastHttpApi
 
         public Type ControllerType { get; set; }
 
-        public bool SingleInstance { get; set; }
+        public InstanceType InstanceType { get; set; }
 
         public RouteTemplateAttribute Route { get; set; }
 
-        public DataConvertAttribute DataConvert { get; set; }
+        public DataConvertAttribute DataConverter { get; set; }
 
         public OptionsAttribute OptionsAttribute { get; set; }
 
@@ -129,6 +138,8 @@ namespace BeetleX.FastHttpApi
         public object Controller { get; set; }
 
         public string SourceUrl { get; set; }
+
+        public bool HasValidation { get; private set; } = false;
 
         private void LoadParameter()
         {
@@ -219,11 +230,27 @@ namespace BeetleX.FastHttpApi
                 }
                 else
                 {
-                    pb = new DefaultParameter();
+                    pb = HttpApiServer.ActionFactory.GetParameterBinder(pi.ParameterType);
+                    if (pb == null)
+                    {
+                        if (HttpApiServer.ActionFactory.HasParameterBindEvent)
+                        {
+                            pb = new ParamterEventBinder(HttpApiServer.ActionFactory);
+
+                        }
+                        else
+                        {
+                            pb = new DefaultParameter();
+                        }
+                    }
                 }
+                pb.ActionHandler = this;
                 pb.ParameterInfo = pi;
                 pb.Name = pi.Name;
                 pb.Type = pi.ParameterType;
+                pb.Validations = pi.GetCustomAttributes<Validations.ValidationBase>(false).ToArray();
+                if (!HasValidation)
+                    HasValidation = pb.Validations != null && pb.Validations.Length > 0;
                 pb.CacheKey = pi.GetCustomAttribute<CacheKeyParameter>(false);
                 Parameters.Add(pb);
             }
@@ -275,18 +302,87 @@ namespace BeetleX.FastHttpApi
             }
             return key.ToString();
         }
+
+        public bool ValidateParamters(object[] parameters, out (Validations.ValidationBase, ParameterInfo) error)
+        {
+            error = (null, null);
+            for (int i = 0; i < Parameters.Count; i++)
+            {
+                var dp = Parameters[i];
+                Validations.ValidationBase[] vs = dp.Validations;
+                if (vs != null && vs.Length > 0)
+                {
+                    for (int k = 0; k < vs.Length; k++)
+                    {
+                        if (!vs[k].Execute(parameters[i]))
+                        {
+                            error = (vs[k], dp.ParameterInfo);
+                            return false;
+                        }
+                    }
+                }
+            }
+
+            return true;
+        }
+    }
+
+
+    public class ParamterEventBinder : ParameterBinder
+    {
+        public ParamterEventBinder(ActionHandlerFactory actionHandlerFactory)
+        {
+            ActionHandlerFactory = actionHandlerFactory;
+        }
+
+        public override bool DataParameter => false;
+
+        public ActionHandlerFactory ActionHandlerFactory { get; internal set; }
+
+        public override object GetValue(IHttpContext context)
+        {
+            EventParameterBinding e = new EventParameterBinding();
+            e.ActionHandler = this.ActionHandler;
+            e.Context = context;
+            e.Type = Type;
+            ActionHandlerFactory.OnParameterBinding(e);
+            return e.Parameter;
+        }
+    }
+
+
+
+    [AttributeUsage(AttributeTargets.Class)]
+    public class PMapper : Attribute
+    {
+        public PMapper(Type type)
+        {
+            ParameterType = type;
+        }
+        public Type ParameterType { get; set; }
+    }
+
+    public interface IParameterBinder
+    {
+        string Name { get; }
+
+        object GetValue(IHttpContext context);
     }
 
     [AttributeUsage(AttributeTargets.Parameter)]
-    public abstract class ParameterBinder : Attribute
+    public abstract class ParameterBinder : Attribute, IParameterBinder
     {
         public Type Type { get; internal set; }
 
         public System.Reflection.ParameterInfo ParameterInfo { get; internal set; }
 
+        public ActionHandler ActionHandler { get; internal set; }
+
         public string Name { get; internal set; }
 
         public virtual bool DataParameter => true;
+
+        public Validations.ValidationBase[] Validations { get; set; }
 
         public abstract object GetValue(IHttpContext context);
 
